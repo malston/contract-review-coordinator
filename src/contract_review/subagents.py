@@ -1,13 +1,15 @@
-"""Subagent dispatch seam and context-scoping task builders.
+"""Subagent definitions, the dispatch seam, and context-scoping task builders.
 
-A subagent is isolated: its entire universe is the Task the coordinator writes
-for it. So the coordinator decides -- structurally -- exactly which clauses each
-subagent sees. The extractor sees the whole document; the risk-checker sees only
-the liability slice.
+Each subagent is an `AgentDefinition` -- the same shape the Claude Agent SDK uses
+for `ClaudeAgentOptions(agents={...})`. The coordinator selects one by
+`subagent_type` (the key it is registered under) and writes its entire context
+into the task: the extractor sees the whole document; the risk-checker sees only
+the liability slice. A subagent shares no memory with the coordinator or its
+sibling, so anything not passed cannot be recovered.
 
 `SubagentRunner` is the seam. `StubRunner` runs the subagents deterministically
-offline (used by the tests and the offline demo); `ClaudeRunner` (in `live.py`)
-runs them against the real Messages API.
+offline (tests + offline demo); `ClaudeRunner`/`build_agent_options` (in
+`live.py`) run them against the real SDK.
 """
 
 from dataclasses import dataclass
@@ -15,33 +17,70 @@ from typing import Literal, Protocol
 
 from contract_review.schemas import Clause
 
-SubagentRole = Literal["extractor", "risk_checker"]
+SubagentType = Literal["extractor", "risk_checker"]
 
-EXTRACTOR_INSTRUCTION = (
-    "You are extracting structured clauses from ONE vendor contract. "
-    "The clauses below are already normalized. Select which are payment terms "
-    "and which are liability clauses; do not invent clauses. Return JSON: "
-    '{"payment_terms": [clause_id...], "liability_clauses": [clause_id...]}. '
-    "Preserve clause_id exactly."
+
+@dataclass
+class AgentDefinition:
+    """A subagent configuration, mirroring `claude_agent_sdk.AgentDefinition`.
+
+    These are the load-bearing fields for this example. The real SDK type carries
+    more (`disallowedTools`, `skills`, `memory`, `mcpServers`, `initialPrompt`,
+    `background`, `effort`, `permissionMode`). Field names match the SDK exactly,
+    including its camelCase `maxTurns`, so the offline shape transfers to the real
+    SDK without translation. `model` accepts an alias ("opus", "sonnet", "haiku",
+    "inherit") or a full model id.
+    """
+
+    description: str
+    prompt: str
+    tools: list[str] | None = None
+    model: str | None = None
+    maxTurns: int | None = None  # noqa: N815 -- matches the SDK field name
+
+
+EXTRACTOR_AGENT = AgentDefinition(
+    description="Extract payment terms and liability clauses from one vendor contract.",
+    prompt=(
+        "You are extracting structured clauses from ONE vendor contract. "
+        "The clauses below are already normalized. Select which are payment terms "
+        "and which are liability clauses; do not invent clauses. Return JSON: "
+        '{"payment_terms": [clause_id...], "liability_clauses": [clause_id...]}. '
+        "Preserve clause_id exactly."
+    ),
+    tools=[],
+    model="inherit",
 )
 
-RISK_INSTRUCTION = (
-    "You are reviewing liability clauses from ONE contract for cap exposure "
-    "(the cap is $1,000,000 USD aggregate). For each clause decide whether it is "
-    "a liability/indemnity clause whose `amount` represents exposure the cap "
-    "applies to. Do NOT compare numbers yourself -- the system does the "
-    'arithmetic. Return JSON: {"verdicts": [{"clause_id", "page", '
-    '"is_liability_exposure", "amount", "rationale"}]}, preserving clause_id and '
-    "page unchanged."
+RISK_CHECKER_AGENT = AgentDefinition(
+    description="Classify liability clauses for $1M cap exposure (the semantic call only).",
+    prompt=(
+        "You are reviewing liability clauses from ONE contract for cap exposure "
+        "(the cap is $1,000,000 USD aggregate). For each clause decide whether it is "
+        "a liability/indemnity clause whose `amount` represents exposure the cap "
+        "applies to. Do NOT compare numbers yourself -- the system does the "
+        'arithmetic. Return JSON: {"verdicts": [{"clause_id", "page", '
+        '"is_liability_exposure", "amount", "rationale"}]}, preserving clause_id and '
+        "page unchanged."
+    ),
+    tools=[],
+    model="inherit",
 )
+
+# Registered by `subagent_type`, exactly as `ClaudeAgentOptions(agents={...})`.
+AGENTS: dict[str, AgentDefinition] = {
+    "extractor": EXTRACTOR_AGENT,
+    "risk_checker": RISK_CHECKER_AGENT,
+}
 
 
 @dataclass
 class Task:
-    """The complete, isolated context handed to one subagent."""
+    """One isolated subagent invocation: the `subagent_type` selecting a registered
+    `AgentDefinition`, plus the context the coordinator scoped for it."""
 
-    role: SubagentRole
-    instruction: str
+    subagent_type: SubagentType
+    agent: AgentDefinition
     clauses: list[Clause]
 
 
@@ -57,23 +96,25 @@ class StubRunner:
     """
 
     def __init__(self, *, extractor_result: dict, risk_result: dict):
-        self._results: dict[SubagentRole, dict] = {
+        self._results: dict[SubagentType, dict] = {
             "extractor": extractor_result,
             "risk_checker": risk_result,
         }
-        self.calls: list[SubagentRole] = []
+        self.calls: list[SubagentType] = []
 
     def run(self, task: Task) -> dict:
-        self.calls.append(task.role)
-        return self._results[task.role]
+        self.calls.append(task.subagent_type)
+        return self._results[task.subagent_type]
 
 
 def build_extractor_task(clauses: list[Clause]) -> Task:
     """The extractor needs the whole document to classify clauses."""
-    return Task(role="extractor", instruction=EXTRACTOR_INSTRUCTION, clauses=clauses)
+    return Task(subagent_type="extractor", agent=AGENTS["extractor"], clauses=clauses)
 
 
 def build_risk_task(liability_clauses: list[Clause]) -> Task:
     """The risk-checker needs ONLY the liability clauses -- never the payment
     terms, never the full document."""
-    return Task(role="risk_checker", instruction=RISK_INSTRUCTION, clauses=liability_clauses)
+    return Task(
+        subagent_type="risk_checker", agent=AGENTS["risk_checker"], clauses=liability_clauses
+    )

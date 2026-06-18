@@ -33,6 +33,28 @@ def ingest_extraction(state: CoordinatorState, raw: dict) -> list[Clause]:
     return clauses
 
 
+def make_pdf_extract_hook(state: CoordinatorState):
+    """Wrap the normalizer as a PostToolUse hook (SDK-shaped).
+
+    It canonicalizes the raw `pdf_extract` output -- and parses `amount`
+    deterministically -- *before* the model reasons over it, replacing the tool's
+    output via `updatedToolOutput` so the model only ever sees canonical clauses.
+    """
+
+    def pdf_extract_normalizer(input_data: dict, tool_use_id: str, context) -> dict:
+        clauses = ingest_extraction(state, input_data["tool_response"])
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "updatedToolOutput": {
+                    "normalized_clauses": [c.model_dump(mode="json") for c in clauses]
+                },
+            }
+        }
+
+    return pdf_extract_normalizer
+
+
 def run_extractor(state: CoordinatorState, runner: SubagentRunner) -> dict:
     """Dispatch the extractor subagent over the whole document; record which
     clauses it selected as liability clauses (its semantic call)."""

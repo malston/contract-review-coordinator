@@ -6,10 +6,11 @@ a deterministic programmatic gate, not a prompt instruction: a prose guard is
 probabilistic and, worse, the attacker's text can live inside the very contract
 being processed.
 
-The gate reads real completion state (a Review written by the coordinator after
-the risk-checker returned) -- never the model's claim that it finished. "The
-model said the review is done" is the natural-language-termination anti-pattern
-wearing a compliance hat.
+`evaluate_send_email` is the pure decision -- it reads real completion state (a
+Review written by the coordinator after the risk-checker returned), never the
+model's claim that it finished. `make_send_email_hook` wraps that decision as an
+SDK-shaped PreToolUse hook. "The model said the review is done" is the
+natural-language-termination anti-pattern wearing a compliance hat.
 """
 
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ class GateDecision:
 LEGAL_RECIPIENT = "legal@acme.com"
 
 
-def pre_tool_send_email(email: EmailRequest, state: CoordinatorState) -> GateDecision:
+def evaluate_send_email(email: EmailRequest, state: CoordinatorState) -> GateDecision:
     # 1. The summary may only go to the designated legal recipient -- a fully
     #    reviewed summary sent to the wrong party is still a compliance failure.
     if email.to != LEGAL_RECIPIENT:
@@ -64,3 +65,26 @@ def pre_tool_send_email(email: EmailRequest, state: CoordinatorState) -> GateDec
         )
 
     return GateDecision(True)
+
+
+def make_send_email_hook(state: CoordinatorState):
+    """Wrap `evaluate_send_email` as a PreToolUse hook (SDK-shaped).
+
+    Closing over `state` is how harness state reaches an SDK hook -- the SDK's own
+    `context` argument carries SDK metadata, not your coordinator state. The same
+    function works in the offline loop and the real SDK adapter.
+    """
+
+    def send_email_gate(input_data: dict, tool_use_id: str, context) -> dict:
+        decision = evaluate_send_email(EmailRequest(**input_data["tool_input"]), state)
+        if decision.allowed:
+            return {}
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": decision.reason,
+            }
+        }
+
+    return send_email_gate

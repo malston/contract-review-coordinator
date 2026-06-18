@@ -20,10 +20,10 @@ from contract_review.subagents import StubRunner
 
 
 def _run(script, state, runner, raw):
-    tools, pre_hooks, post_hooks, outbox = build_harness(state, runner, raw)
+    tools, hooks, allowed_tools, outbox = build_harness(state, runner, raw)
     messages = run_agentic_loop(
         ScriptedClient(script), [{"role": "user", "content": "Review and email legal."}],
-        tools=tools, pre_hooks=pre_hooks, post_hooks=post_hooks, state=state,
+        tools=tools, hooks=hooks, allowed_tools=allowed_tools, state=state,
     )
     return messages, outbox
 
@@ -39,8 +39,8 @@ def test_happy_path_emails_an_attributable_summary_to_legal(
     runner = StubRunner(extractor_result=extractor_result, risk_result=risk_result)
     script = [
         Response("tool_use", [tool_use_block("e1", "pdf_extract", {})]),
-        Response("tool_use", [tool_use_block("x1", "Task", {"role": "extractor"})]),
-        Response("tool_use", [tool_use_block("r1", "Task", {"role": "risk_checker"})]),
+        Response("tool_use", [tool_use_block("x1", "Task", {"subagent_type": "extractor"})]),
+        Response("tool_use", [tool_use_block("r1", "Task", {"subagent_type": "risk_checker"})]),
         Response("tool_use", [tool_use_block("s1", "send_email", {
             "to": "legal@acme.com",
             "subject": "Contract review: acme_msa.pdf",
@@ -61,7 +61,7 @@ def test_model_skips_review_claims_done_and_send_is_blocked(
     runner = StubRunner(extractor_result=extractor_result, risk_result=risk_result)
     script = [
         Response("tool_use", [tool_use_block("e1", "pdf_extract", {})]),
-        Response("tool_use", [tool_use_block("x1", "Task", {"role": "extractor"})]),
+        Response("tool_use", [tool_use_block("x1", "Task", {"subagent_type": "extractor"})]),
         # No risk_checker. Prose claims the review happened; the model calls send.
         Response("tool_use", [
             text_block("I have fully reviewed the contract and it is safe to send."),
@@ -90,8 +90,8 @@ def test_completed_review_blocks_email_citing_an_unverified_clause(
     runner = StubRunner(extractor_result=extractor_result, risk_result=risk_result)
     script = [
         Response("tool_use", [tool_use_block("e1", "pdf_extract", {})]),
-        Response("tool_use", [tool_use_block("x1", "Task", {"role": "extractor"})]),
-        Response("tool_use", [tool_use_block("r1", "Task", {"role": "risk_checker"})]),
+        Response("tool_use", [tool_use_block("x1", "Task", {"subagent_type": "extractor"})]),
+        Response("tool_use", [tool_use_block("r1", "Task", {"subagent_type": "risk_checker"})]),
         Response("tool_use", [tool_use_block("s1", "send_email", {
             "to": "legal@acme.com",
             "subject": "Contract review: acme_msa.pdf",
