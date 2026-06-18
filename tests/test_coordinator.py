@@ -18,6 +18,7 @@ from contract_review.coordinator import (
     compose_email,
     flag_over_cap,
     ingest_extraction,
+    make_pdf_extract_hook,
     run_extractor,
     run_risk_check,
 )
@@ -152,3 +153,16 @@ def test_flag_over_cap_skips_clause_with_no_parseable_amount():
     v = Verdict(clause_id="x", page=1, is_liability_exposure=True,
                 amount=None, rationale="exposure but no number")
     assert flag_over_cap([v]) == []
+
+
+def test_pdf_extract_hook_returns_post_tool_output_with_deterministic_amount(state, sample_raw):
+    # The PostToolUse hook canonicalizes before the model reasons over it: the
+    # model sees a parsed amount, never the raw "$5,000,000." text.
+    hook = make_pdf_extract_hook(state)
+    input_data = {"tool_name": "pdf_extract", "tool_input": {}, "tool_response": sample_raw}
+    out = hook(input_data, "t1", None)
+    spec = out["hookSpecificOutput"]
+    assert spec["hookEventName"] == "PostToolUse"
+    by_id = {c["clause_id"]: c for c in spec["updatedToolOutput"]["normalized_clauses"]}
+    assert by_id["12.1"]["amount"] == "5000000"  # Decimal serialized in json mode
+    assert state.normalized_clauses  # the hook also stored canonical clauses on state

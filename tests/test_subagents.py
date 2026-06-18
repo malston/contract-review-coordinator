@@ -9,10 +9,13 @@ is enforced by the harness (the task builders), not left to the model to honor.
 
 from decimal import Decimal
 
+import pytest
+
 from contract_review.schemas import Clause
 from contract_review.subagents import (
     AGENTS,
     AgentDefinition,
+    Task,
     build_extractor_task,
     build_risk_task,
 )
@@ -72,3 +75,10 @@ def test_risk_task_preserves_attribution_and_amount():
     task = build_risk_task(liability)
     clause = task.clauses[0]
     assert (clause.clause_id, clause.page, clause.amount) == ("12.1", 9, Decimal("5000000"))
+
+
+def test_task_rejects_an_agent_that_does_not_match_its_subagent_type():
+    # The two fields cannot contradict: a mismatched pair would run the wrong
+    # subagent silently, so construction is refused.
+    with pytest.raises(ValueError, match="does not match"):
+        Task(subagent_type="extractor", agent=AGENTS["risk_checker"], clauses=[])

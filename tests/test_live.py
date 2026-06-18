@@ -4,12 +4,19 @@ thin, key-gated boundary and are exercised against the real API, not mocks.
 """
 
 import asyncio
+from decimal import Decimal
 
 import pytest
 
-from contract_review.live import parse_subagent_output
-from contract_review.schemas import EmailRequest
+from contract_review.live import (
+    COORDINATOR_SYSTEM,
+    COORDINATOR_TOOLS,
+    parse_subagent_output,
+    subagent_prompt,
+)
+from contract_review.schemas import Clause, EmailRequest
 from contract_review.state import CoordinatorState
+from contract_review.subagents import AGENTS, build_extractor_task
 
 
 def test_parses_clean_json():
@@ -30,6 +37,29 @@ def test_parses_json_with_surrounding_prose():
 def test_raises_when_no_json_object_present():
     with pytest.raises(ValueError, match="JSON"):
         parse_subagent_output("I could not complete the task.")
+
+
+def test_live_coordinator_task_tool_uses_subagent_type_matching_the_harness():
+    # The live coordinator's Task tool must speak the same selector the harness
+    # reads (`subagent_type`), or a real run KeyErrors on dispatch.
+    task_tool = next(t for t in COORDINATOR_TOOLS if t["name"] == "Task")
+    props = task_tool["input_schema"]["properties"]
+    assert "role" not in props
+    assert task_tool["input_schema"]["required"] == ["subagent_type"]
+    assert set(props["subagent_type"]["enum"]) == set(AGENTS)
+    assert "role=" not in COORDINATOR_SYSTEM
+    assert "subagent_type=" in COORDINATOR_SYSTEM
+
+
+def test_subagent_prompt_uses_the_agents_prompt_and_scoped_clauses():
+    clause = Clause(
+        clause_id="12.1", page=9, type="liability",
+        text="Total liability shall not exceed $5,000,000.",
+        amount=Decimal("5000000"), source_name="acme_msa.pdf",
+    )
+    prompt = subagent_prompt(build_extractor_task([clause]))
+    assert AGENTS["extractor"].prompt in prompt  # not the removed task.instruction
+    assert "12.1" in prompt
 
 
 def _state() -> CoordinatorState:

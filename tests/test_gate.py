@@ -100,6 +100,13 @@ def test_allows_when_review_complete_doc_matches_and_clauses_verified():
     assert decision.reason == ""
 
 
+def test_allows_a_complete_review_with_no_cited_clauses():
+    # An empty citation set is trivially a subset of the verified set, so a
+    # "nothing flagged" summary is intentionally permitted.
+    decision = evaluate_send_email(_email(cited_clause_ids=[]), _state(_complete_review()))
+    assert decision.allowed is True
+
+
 def test_hook_denies_with_sdk_permission_decision_shape():
     hook = make_send_email_hook(_state(None))
     out = hook({"tool_name": "send_email", "tool_input": _email().model_dump()}, "t1", None)

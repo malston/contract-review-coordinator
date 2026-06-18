@@ -187,3 +187,103 @@ def test_hook_matcher_with_none_matches_every_tool():
         state=None,
     )
     assert seen == ["alpha", "beta"]
+
+
+def _one_tool_call(name="danger"):
+    return [
+        Response("tool_use", [tool_use_block("t1", name, {})]),
+        Response("end_turn", [text_block("ok")]),
+    ]
+
+
+def _pre(hook, *, tool="danger", impl=None):
+    return dict(
+        tools={tool: impl or (lambda i, s: {"ran": True})},
+        hooks={"PreToolUse": [HookMatcher(matcher=tool, hooks=[hook])]},
+        state=None,
+    )
+
+
+def test_ask_decision_fails_closed_rather_than_running_the_tool():
+    # The SDK would pause for approval on "ask"; an irreversible action must not
+    # silently run. The gate substrate fails closed on anything but allow/deny.
+    def ask(i, t, c):
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "ask"}}
+
+    with pytest.raises(LoopError, match="unhandled permissionDecision"):
+        run_agentic_loop(ScriptedClient(_one_tool_call()), [], **_pre(ask))
+
+
+def test_defer_decision_fails_closed():
+    def defer(i, t, c):
+        return {"hookSpecificOutput": {"permissionDecision": "defer"}}
+
+    with pytest.raises(LoopError, match="unhandled permissionDecision"):
+        run_agentic_loop(ScriptedClient(_one_tool_call()), [], **_pre(defer))
+
+
+def test_non_dict_hook_return_fails_closed():
+    with pytest.raises(LoopError, match="non-dict"):
+        run_agentic_loop(ScriptedClient(_one_tool_call()), [], **_pre(lambda i, t, c: None))
+
+
+def test_top_level_block_decision_denies_the_tool():
+    ran = []
+
+    def block(i, t, c):
+        return {"decision": "block", "reason": "policy stop"}
+
+    messages = run_agentic_loop(
+        ScriptedClient(_one_tool_call()), [],
+        **_pre(block, impl=lambda i, s: ran.append(1)),
+    )
+    assert ran == []
+    assert "policy stop" in _tool_results(messages)[0]["content"]
+
+
+def test_tool_on_allowlist_can_still_be_denied_by_a_hook():
+    # allowlist passes, but the PreToolUse hook denies -> blocked, never run.
+    ran = []
+
+    def deny(i, t, c):
+        return {"hookSpecificOutput": {
+            "permissionDecision": "deny", "permissionDecisionReason": "no",
+        }}
+
+    messages = run_agentic_loop(
+        ScriptedClient(_one_tool_call()), [],
+        tools={"danger": lambda i, s: ran.append(1)},
+        hooks={"PreToolUse": [HookMatcher(matcher="danger", hooks=[deny])]},
+        allowed_tools=["danger"],
+        state=None,
+    )
+    assert ran == []
+    assert _tool_results(messages)[0]["is_error"] is True
+
+
+def test_allow_listed_tool_without_an_implementation_raises():
+    with pytest.raises(LoopError, match="no registered implementation"):
+        run_agentic_loop(
+            ScriptedClient(_one_tool_call("ghost")), [],
+            tools={}, allowed_tools=["ghost"], state=None,
+        )
+
+
+def test_chained_post_tool_use_hooks_thread_the_output():
+    def wrap_a(i, t, c):
+        return {"hookSpecificOutput": {"updatedToolOutput": {"v": i["tool_response"]["v"] + "-a"}}}
+
+    def wrap_b(i, t, c):
+        return {"hookSpecificOutput": {"updatedToolOutput": {"v": i["tool_response"]["v"] + "-b"}}}
+
+    messages = run_agentic_loop(
+        ScriptedClient([
+            Response("tool_use", [tool_use_block("t1", "extract", {})]),
+            Response("end_turn", [text_block("ok")]),
+        ]), [],
+        tools={"extract": lambda i, s: {"v": "x"}},
+        hooks={"PostToolUse": [HookMatcher(matcher="extract", hooks=[wrap_a, wrap_b])]},
+        state=None,
+    )
+    # second hook transforms the first hook's output: x -> x-a -> x-a-b
+    assert '"v": "x-a-b"' in _tool_results(messages)[0]["content"]

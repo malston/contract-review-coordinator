@@ -91,16 +91,42 @@ def _matching_hooks(
             yield from matcher.hooks
 
 
+# An irreversible action must never run on a signal the gate doesn't understand.
+# Only an explicit allow (an empty dict, or permissionDecision "allow") proceeds;
+# every other recognized blocking signal blocks, and anything else fails closed.
+_ALLOW_DECISIONS = {None, "allow"}
+
+
 def _pre_tool_deny_reason(
     hooks: dict[str, list[HookMatcher]], tool_name: str, tool_input: dict,
     tool_use_id: str, context: Any,
 ) -> str | None:
-    """Run PreToolUse hooks; return a deny reason if any blocks, else None."""
+    """Run PreToolUse hooks; return a deny reason if any blocks, else None.
+
+    Fails closed: an `"ask"`/`"defer"`/unrecognized `permissionDecision`, or a
+    non-dict return, raises rather than silently allowing the tool to run.
+    """
     input_data = {"tool_name": tool_name, "tool_input": tool_input}
     for hook in _matching_hooks(hooks, "PreToolUse", tool_name):
-        spec = (hook(input_data, tool_use_id, context) or {}).get("hookSpecificOutput", {})
-        if spec.get("permissionDecision") == "deny":
-            return spec.get("permissionDecisionReason", "blocked by PreToolUse hook")
+        out = hook(input_data, tool_use_id, context)
+        if not isinstance(out, dict):
+            raise LoopError(
+                f"PreToolUse hook for {tool_name!r} returned a non-dict "
+                f"({type(out).__name__}); refusing to default to allow."
+            )
+        # Top-level stop signals (SDK): decision "block" / continue_ False.
+        if out.get("decision") == "block" or out.get("continue_") is False:
+            return out.get("reason") or out.get("stopReason") or "blocked by PreToolUse hook"
+        decision = out.get("hookSpecificOutput", {}).get("permissionDecision")
+        if decision == "deny":
+            return out["hookSpecificOutput"].get(
+                "permissionDecisionReason", "blocked by PreToolUse hook"
+            )
+        if decision not in _ALLOW_DECISIONS:
+            raise LoopError(
+                f"PreToolUse hook for {tool_name!r} returned unhandled "
+                f"permissionDecision {decision!r}; refusing to default to allow."
+            )
     return None
 
 
@@ -158,6 +184,8 @@ def run_agentic_loop(
                 tool_results.append(tool_result_block(tool_use_id, deny_reason, is_error=True))
                 continue
 
+            if name not in tools:
+                raise LoopError(f"allow-listed tool {name!r} has no registered implementation")
             result = tools[name](tool_input, state)
             result = _apply_post_tool_hooks(hooks, name, tool_input, result, tool_use_id, state)
             tool_results.append(tool_result_block(tool_use_id, result))

@@ -73,6 +73,12 @@ def test_resume_unknown_session_raises(state):
         store.resume("never-saved", doc_sha256=state.doc_sha256)
 
 
+def test_fork_unknown_session_raises():
+    store = SessionStore()
+    with pytest.raises(KeyError, match="unknown session"):
+        store.fork("never-saved", "new-branch")
+
+
 def test_saving_does_not_bind_the_manifest_to_later_state_mutation(
     state, sample_raw, extractor_result, risk_result
 ):

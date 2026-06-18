@@ -23,9 +23,9 @@ MODEL = "claude-opus-4-8"
 
 COORDINATOR_SYSTEM = (
     "You are a contract-review coordinator. Decompose the request and use the "
-    "tools. Call pdf_extract first, then Task(role='extractor'), then "
-    "Task(role='risk_checker'), then send_email. You may not send before the "
-    "risk review has run -- the system enforces this regardless of what you say."
+    "tools. Call pdf_extract first, then Task(subagent_type='extractor'), then "
+    "Task(subagent_type='risk_checker'), then send_email. You may not send before "
+    "the risk review has run -- the system enforces this regardless of what you say."
 )
 
 COORDINATOR_TOOLS = [
@@ -36,12 +36,15 @@ COORDINATOR_TOOLS = [
     },
     {
         "name": "Task",
-        "description": "Dispatch an isolated subagent. role='extractor' selects "
-        "payment vs liability clauses; role='risk_checker' reviews liability clauses.",
+        "description": "Dispatch an isolated subagent. subagent_type='extractor' "
+        "selects payment vs liability clauses; subagent_type='risk_checker' reviews "
+        "liability clauses.",
         "input_schema": {
             "type": "object",
-            "properties": {"role": {"type": "string", "enum": ["extractor", "risk_checker"]}},
-            "required": ["role"],
+            "properties": {
+                "subagent_type": {"type": "string", "enum": ["extractor", "risk_checker"]}
+            },
+            "required": ["subagent_type"],
         },
     },
     {
@@ -86,8 +89,9 @@ def build_agent_options(
     (the send_email gate as PreToolUse, the normalizer as PostToolUse), and the
     session controls `resume` / `fork_session` / `session_id`. A full run also
     needs the custom tools (`pdf_extract`, `send_email`) registered as MCP/SDK
-    tools and the CLI + API key; this function builds the configuration that
-    proves the surface is real, not invented.
+    tools and the CLI + API key; this function builds the configuration object
+    itself. Its field names are verified against the installed `claude-agent-sdk`
+    and exercised in `tests/test_live.py`.
     """
     from claude_agent_sdk import AgentDefinition as SdkAgentDefinition
     from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
@@ -151,6 +155,13 @@ class ClaudeClient:
         return Response(message.stop_reason, [block.model_dump() for block in message.content])
 
 
+def subagent_prompt(task: Task) -> str:
+    """The isolated context handed to a subagent: its agent's prompt plus the
+    clauses the coordinator scoped for it."""
+    clauses = json.dumps([c.model_dump(mode="json") for c in task.clauses])
+    return f"{task.agent.prompt}\n\n<clauses>\n{clauses}\n</clauses>"
+
+
 class ClaudeRunner:
     """SubagentRunner backed by the Messages API -- runs an isolated subagent."""
 
@@ -162,15 +173,11 @@ class ClaudeRunner:
         self._max_tokens = max_tokens
 
     def run(self, task: Task) -> dict:
-        clauses = json.dumps([c.model_dump(mode="json") for c in task.clauses])
         message = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             thinking={"type": "adaptive"},
-            messages=[{
-                "role": "user",
-                "content": f"{task.instruction}\n\n<clauses>\n{clauses}\n</clauses>",
-            }],
+            messages=[{"role": "user", "content": subagent_prompt(task)}],
         )
         text = "".join(block.text for block in message.content if block.type == "text")
         return parse_subagent_output(text)

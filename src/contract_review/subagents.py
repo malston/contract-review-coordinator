@@ -8,8 +8,9 @@ the liability slice. A subagent shares no memory with the coordinator or its
 sibling, so anything not passed cannot be recovered.
 
 `SubagentRunner` is the seam. `StubRunner` runs the subagents deterministically
-offline (tests + offline demo); `ClaudeRunner`/`build_agent_options` (in
-`live.py`) run them against the real SDK.
+offline (tests + offline demo). In `live.py`, `ClaudeRunner` runs a subagent via
+the Messages API, and `build_agent_options` registers these `AgentDefinition`s on
+a real `ClaudeAgentOptions` for the Agent SDK.
 """
 
 from dataclasses import dataclass
@@ -77,11 +78,23 @@ AGENTS: dict[str, AgentDefinition] = {
 @dataclass
 class Task:
     """One isolated subagent invocation: the `subagent_type` selecting a registered
-    `AgentDefinition`, plus the context the coordinator scoped for it."""
+    `AgentDefinition`, plus the context the coordinator scoped for it.
+
+    The two are not independent: `agent` must be the one registered under
+    `subagent_type`. A mismatched pair would run the wrong subagent silently, so
+    construction refuses it -- use `build_extractor_task`/`build_risk_task`.
+    """
 
     subagent_type: SubagentType
     agent: AgentDefinition
     clauses: list[Clause]
+
+    def __post_init__(self) -> None:
+        if self.subagent_type not in AGENTS or self.agent is not AGENTS[self.subagent_type]:
+            raise ValueError(
+                f"Task.agent does not match subagent_type {self.subagent_type!r}; "
+                "use build_extractor_task/build_risk_task or AGENTS[subagent_type]."
+            )
 
 
 class SubagentRunner(Protocol):
