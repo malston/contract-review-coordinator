@@ -6,8 +6,8 @@ subagents (extractor, then risk-checker), and emails a summary to legal -- but
 the `send_email` tool is **blocked unless the risk review has actually
 completed**. A model that merely _claims_ "I've reviewed it" cannot send.
 
-- The design doc this implements: [`../deliverables/domain1-build-exercise.md`](../deliverables/domain1-build-exercise.md)
-- The exercise prompt: [`../.prompts/domain1-build-exercise.prompt.md`](../.prompts/domain1-build-exercise.prompt.md)
+- The design doc this implements: [`./deliverables/domain1-build-exercise.md`](./deliverables/domain1-build-exercise.md)
+- The exercise prompt: [`./.prompts/domain1-build-exercise.prompt.md`](./.prompts/domain1-build-exercise.prompt.md)
 
 ## Quick start
 
