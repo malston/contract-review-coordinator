@@ -269,6 +269,15 @@ def test_allow_listed_tool_without_an_implementation_raises():
         )
 
 
+def test_unknown_tool_error_does_not_claim_allowlisting_when_none_is_set():
+    # With allowed_tools=None nothing was allow-listed; the error must not imply it.
+    with pytest.raises(LoopError) as excinfo:
+        run_agentic_loop(ScriptedClient(_one_tool_call("ghost")), [], tools={}, state=None)
+    message = str(excinfo.value)
+    assert "no registered implementation" in message
+    assert "allow-listed" not in message
+
+
 def test_chained_post_tool_use_hooks_thread_the_output():
     def wrap_a(i, t, c):
         return {"hookSpecificOutput": {"updatedToolOutput": {"v": i["tool_response"]["v"] + "-a"}}}

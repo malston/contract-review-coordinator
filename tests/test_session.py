@@ -79,6 +79,20 @@ def test_fork_unknown_session_raises():
         store.fork("never-saved", "new-branch")
 
 
+def test_fork_refuses_to_overwrite_an_existing_session(
+    state, sample_raw, extractor_result, risk_result
+):
+    runner = _runner(extractor_result, risk_result)
+    ingest_extraction(state, sample_raw)
+    run_extractor(state, runner)
+    store = SessionStore()
+    store.save("baseline", state)
+    store.fork("baseline", "branch")
+    # Forking onto an id that already exists would silently clobber that branch.
+    with pytest.raises(ValueError, match="already exists"):
+        store.fork("baseline", "branch")
+
+
 def test_saving_does_not_bind_the_manifest_to_later_state_mutation(
     state, sample_raw, extractor_result, risk_result
 ):

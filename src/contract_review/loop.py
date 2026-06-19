@@ -185,7 +185,7 @@ def run_agentic_loop(
                 continue
 
             if name not in tools:
-                raise LoopError(f"allow-listed tool {name!r} has no registered implementation")
+                raise LoopError(f"tool {name!r} has no registered implementation")
             result = tools[name](tool_input, state)
             result = _apply_post_tool_hooks(hooks, name, tool_input, result, tool_use_id, state)
             tool_results.append(tool_result_block(tool_use_id, result))

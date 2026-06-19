@@ -89,6 +89,9 @@ class SessionStore:
     def fork(self, session_id: str, new_session_id: str) -> SessionManifest:
         if session_id not in self._manifests:
             raise KeyError(f"unknown session: {session_id!r}")
+        if new_session_id in self._manifests:
+            # Forking onto an existing id would silently clobber that branch.
+            raise ValueError(f"session {new_session_id!r} already exists; fork would overwrite it.")
         forked = self._manifests[session_id].model_copy(
             deep=True, update={"session_id": new_session_id}
         )
