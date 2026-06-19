@@ -17,6 +17,15 @@ poetry run pytest                      # NO API key needed
 poetry run python -m contract_review.demo
 ```
 
+Don't know Poetry? Use the Makefile, which wraps these for you:
+
+```bash
+make install                           # install the project + dev tools
+make test                              # run the suite (no API key needed)
+make demo                              # run the offline demo
+make help                              # list all targets
+```
+
 The demo runs the same system along two model trajectories:
 
 ```
