@@ -101,27 +101,75 @@ The hook for building the tool side is flagged in the Domain 2 build exercise.
 
 ## Module guide
 
-| Module           | Responsibility                                                                  |
-| ---------------- | ------------------------------------------------------------------------------- |
-| `loop.py`        | Model-agnostic agentic loop + `ModelClient` seam (`ScriptedClient` offline)     |
-| `harness.py`     | Wires `pdf_extract` / `Task` / `send_email` tools + the two hooks onto the loop |
-| `coordinator.py` | Orchestration steps: ingest, extract, risk-check, flag, compose                 |
-| `gate.py`        | The `send_email` PreToolUse gate (the linchpin)                                 |
-| `normalizer.py`  | The `pdf_extract` PostToolUse normalizer (deterministic `amount`)               |
-| `subagents.py`   | `Task`, the runner seam, `StubRunner`, context-scoped task builders             |
-| `schemas.py`     | `Clause`, `Verdict`, `Review`, `EmailRequest` (provenance is required)          |
-| `state.py`       | `CoordinatorState` -- the harness's memory, not the model's                     |
-| `live.py`        | Optional `ClaudeClient` / `ClaudeRunner` against the real Messages API          |
-| `demo.py`        | The two-trajectory offline demonstration                                        |
+| Module           | Responsibility                                                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------- |
+| `loop.py`        | Model-agnostic agentic loop; `HookMatcher` + SDK-shaped hooks; `allowed_tools` enforced               |
+| `harness.py`     | Wires `pdf_extract` / `Task` / `send_email` tools, the hooks, and `allowed_tools`                     |
+| `coordinator.py` | Orchestration steps: ingest, extract, risk-check, flag, compose; `make_pdf_extract_hook`              |
+| `gate.py`        | The `send_email` gate: `evaluate_send_email` core + `make_send_email_hook` (linchpin)                 |
+| `normalizer.py`  | Deterministic `amount` parsing + canonicalization                                                     |
+| `subagents.py`   | `AgentDefinition`, the `AGENTS` registry, the runner seam, context-scoped task builders               |
+| `session.py`     | `SessionStore`: resume / fork a session from a structured manifest (Domain 1.7)                       |
+| `schemas.py`     | `Clause`, `Verdict`, `Review`, `EmailRequest` (provenance is required)                                |
+| `state.py`       | `CoordinatorState` -- the harness's memory, not the model's                                           |
+| `live.py`        | Optional real paths: `ClaudeClient`/`ClaudeRunner` (Messages API) + `build_agent_options` (Agent SDK) |
+| `demo.py`        | The two-trajectory offline demonstration                                                              |
+
+## Agent SDK surface
+
+The offline implementation speaks the Claude Agent SDK's vocabulary so the shapes
+transfer to a real app without translation:
+
+- **`AgentDefinition` + the `AGENTS` registry** (`subagents.py`) -- each subagent
+  is an `AgentDefinition(description, prompt, tools, model, maxTurns)`, registered
+  by `subagent_type` exactly as `ClaudeAgentOptions(agents={...})`. Field names
+  match the SDK, including its camelCase `maxTurns`.
+- **`allowed_tools`** (`harness.py`, enforced in `loop.py`) -- the coordinator's
+  allowlist; `"Task"` must be present to spawn subagents, and a tool absent from
+  it is refused before it runs.
+- **SDK-shaped hooks** (`loop.py`) -- `hooks={"PreToolUse": [HookMatcher(...)], ...}`,
+  each hook `(input_data, tool_use_id, context) -> dict`. The gate denies with
+  `permissionDecision: "deny"`; the normalizer rewrites output via
+  `updatedToolOutput`.
+
+The hand-written `stop_reason` loop is kept deliberately: the SDK runs that loop
+for you, so writing it out is what makes the Domain 1.1 control-flow discipline
+visible. `live.build_agent_options` then constructs the **genuine**
+`ClaudeAgentOptions` (verified against `claude-agent-sdk`) to prove the surface is
+real, not invented.
+
+## Session resumption and forking (Domain 1.7)
+
+`session.py` persists a session as a **structured manifest** -- the completed
+case facts (normalized clauses, liability slice, the verified `Review`), not the
+raw message/tool-result transcript. Rebuilding from structured state is more
+reliable than replaying stale tool results.
+
+- **resume** (`SessionStore.resume`, mirrors the SDK's `resume=<id>`) restores a
+  completed review into a brand-new session, so the gate passes without re-running.
+- **stale detection** -- resuming against a changed document (`doc_sha256`
+  mismatch) is refused, not silently trusted.
+- **fork** (`SessionStore.fork`, mirrors `fork_session=True`) branches independent
+  sessions from one shared analysis baseline -- e.g. exploring a $1M vs a $100k cap
+  from the same extracted liability set. See `tests/test_session.py`.
 
 ## The live path (optional)
 
 ```bash
-poetry install --with dev --with live
-export ANTHROPIC_API_KEY=...           # or cp .env.example .env
+poetry install --with dev --with live   # adds anthropic + claude-agent-sdk
+export ANTHROPIC_API_KEY=...            # or cp .env.example .env
 ```
 
-`ClaudeClient` and `ClaudeRunner` (`live.py`) drive the loop and subagents
-against `claude-opus-4-8` with adaptive thinking. The deterministic seam
-(`StubRunner` + `ScriptedClient`) powers every test, so the suite never needs a
-key.
+Two real paths live in `live.py`, both opt-in:
+
+- **Messages API** -- `ClaudeClient` / `ClaudeRunner` drive the hand-written loop
+  and subagents against `claude-opus-4-8` with adaptive thinking.
+- **Agent SDK** -- `build_agent_options` returns a real `ClaudeAgentOptions`
+  (agents, `allowed_tools`, PreToolUse/PostToolUse `HookMatcher`s, and
+  `resume`/`fork_session`/`session_id`). A full SDK run additionally needs the
+  custom tools registered as MCP/SDK tools and the CLI; this builds the
+  configuration that proves the surface.
+
+The deterministic seam (`StubRunner` + `ScriptedClient`) powers every test, so the
+suite never needs a key; the SDK-adapter tests run when the live group is
+installed and skip otherwise.

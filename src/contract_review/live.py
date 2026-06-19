@@ -12,16 +12,20 @@ thinking.
 import json
 import re
 
+from contract_review.coordinator import make_pdf_extract_hook
+from contract_review.gate import make_send_email_hook
+from contract_review.harness import COORDINATOR_ALLOWED_TOOLS
 from contract_review.loop import Response
-from contract_review.subagents import Task
+from contract_review.state import CoordinatorState
+from contract_review.subagents import AGENTS, Task
 
 MODEL = "claude-opus-4-8"
 
 COORDINATOR_SYSTEM = (
     "You are a contract-review coordinator. Decompose the request and use the "
-    "tools. Call pdf_extract first, then Task(role='extractor'), then "
-    "Task(role='risk_checker'), then send_email. You may not send before the "
-    "risk review has run -- the system enforces this regardless of what you say."
+    "tools. Call pdf_extract first, then Task(subagent_type='extractor'), then "
+    "Task(subagent_type='risk_checker'), then send_email. You may not send before "
+    "the risk review has run -- the system enforces this regardless of what you say."
 )
 
 COORDINATOR_TOOLS = [
@@ -32,12 +36,15 @@ COORDINATOR_TOOLS = [
     },
     {
         "name": "Task",
-        "description": "Dispatch an isolated subagent. role='extractor' selects "
-        "payment vs liability clauses; role='risk_checker' reviews liability clauses.",
+        "description": "Dispatch an isolated subagent. subagent_type='extractor' "
+        "selects payment vs liability clauses; subagent_type='risk_checker' reviews "
+        "liability clauses.",
         "input_schema": {
             "type": "object",
-            "properties": {"role": {"type": "string", "enum": ["extractor", "risk_checker"]}},
-            "required": ["role"],
+            "properties": {
+                "subagent_type": {"type": "string", "enum": ["extractor", "risk_checker"]}
+            },
+            "required": ["subagent_type"],
         },
     },
     {
@@ -56,6 +63,64 @@ COORDINATOR_TOOLS = [
         },
     },
 ]
+
+
+def _as_async_hook(sync_hook):
+    """The SDK calls hooks as coroutines; our hook cores are sync. Wrap them so the
+    same gate/normalizer logic runs in both the offline loop and the real SDK."""
+
+    async def hook(input_data: dict, tool_use_id: str, context) -> dict:
+        return sync_hook(input_data, tool_use_id, context)
+
+    return hook
+
+
+def build_agent_options(
+    state: CoordinatorState,
+    *,
+    resume: str | None = None,
+    fork_session: bool = False,
+    session_id: str | None = None,
+):
+    """Construct the real `ClaudeAgentOptions` for this coordinator.
+
+    This is the genuine Agent SDK surface the offline implementation mirrors:
+    `agents` (the two AgentDefinitions), `allowed_tools` (incl. "Task"), `hooks`
+    (the send_email gate as PreToolUse, the normalizer as PostToolUse), and the
+    session controls `resume` / `fork_session` / `session_id`. A full run also
+    needs the custom tools (`pdf_extract`, `send_email`) registered as MCP/SDK
+    tools and the CLI + API key; this function builds the configuration object
+    itself. Its field names are verified against the installed `claude-agent-sdk`
+    and exercised in `tests/test_live.py`.
+    """
+    from claude_agent_sdk import AgentDefinition as SdkAgentDefinition
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
+
+    agents = {
+        name: SdkAgentDefinition(
+            description=agent.description,
+            prompt=agent.prompt,
+            tools=agent.tools,
+            model=agent.model,
+            maxTurns=agent.maxTurns,
+        )
+        for name, agent in AGENTS.items()
+    }
+    send_email_gate = _as_async_hook(make_send_email_hook(state))
+    pdf_extract_normalizer = _as_async_hook(make_pdf_extract_hook(state))
+
+    return ClaudeAgentOptions(
+        model=MODEL,
+        agents=agents,
+        allowed_tools=list(COORDINATOR_ALLOWED_TOOLS),
+        hooks={
+            "PreToolUse": [HookMatcher(matcher="send_email", hooks=[send_email_gate])],
+            "PostToolUse": [HookMatcher(matcher="pdf_extract", hooks=[pdf_extract_normalizer])],
+        },
+        resume=resume,
+        fork_session=fork_session,
+        session_id=session_id,
+    )
 
 
 def parse_subagent_output(text: str) -> dict:
@@ -90,6 +155,13 @@ class ClaudeClient:
         return Response(message.stop_reason, [block.model_dump() for block in message.content])
 
 
+def subagent_prompt(task: Task) -> str:
+    """The isolated context handed to a subagent: its agent's prompt plus the
+    clauses the coordinator scoped for it."""
+    clauses = json.dumps([c.model_dump(mode="json") for c in task.clauses])
+    return f"{task.agent.prompt}\n\n<clauses>\n{clauses}\n</clauses>"
+
+
 class ClaudeRunner:
     """SubagentRunner backed by the Messages API -- runs an isolated subagent."""
 
@@ -101,15 +173,11 @@ class ClaudeRunner:
         self._max_tokens = max_tokens
 
     def run(self, task: Task) -> dict:
-        clauses = json.dumps([c.model_dump(mode="json") for c in task.clauses])
         message = self._client.messages.create(
             model=self._model,
             max_tokens=self._max_tokens,
             thinking={"type": "adaptive"},
-            messages=[{
-                "role": "user",
-                "content": f"{task.instruction}\n\n<clauses>\n{clauses}\n</clauses>",
-            }],
+            messages=[{"role": "user", "content": subagent_prompt(task)}],
         )
         text = "".join(block.text for block in message.content if block.type == "text")
         return parse_subagent_output(text)

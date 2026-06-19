@@ -3,9 +3,20 @@ JSON out of model text. The network wrappers (ClaudeClient/ClaudeRunner) are a
 thin, key-gated boundary and are exercised against the real API, not mocks.
 """
 
+import asyncio
+from decimal import Decimal
+
 import pytest
 
-from contract_review.live import parse_subagent_output
+from contract_review.live import (
+    COORDINATOR_SYSTEM,
+    COORDINATOR_TOOLS,
+    parse_subagent_output,
+    subagent_prompt,
+)
+from contract_review.schemas import Clause, EmailRequest
+from contract_review.state import CoordinatorState
+from contract_review.subagents import AGENTS, build_extractor_task
 
 
 def test_parses_clean_json():
@@ -26,3 +37,64 @@ def test_parses_json_with_surrounding_prose():
 def test_raises_when_no_json_object_present():
     with pytest.raises(ValueError, match="JSON"):
         parse_subagent_output("I could not complete the task.")
+
+
+def test_live_coordinator_task_tool_uses_subagent_type_matching_the_harness():
+    # The live coordinator's Task tool must speak the same selector the harness
+    # reads (`subagent_type`), or a real run KeyErrors on dispatch.
+    task_tool = next(t for t in COORDINATOR_TOOLS if t["name"] == "Task")
+    props = task_tool["input_schema"]["properties"]
+    assert "role" not in props
+    assert task_tool["input_schema"]["required"] == ["subagent_type"]
+    assert set(props["subagent_type"]["enum"]) == set(AGENTS)
+    assert "role=" not in COORDINATOR_SYSTEM
+    assert "subagent_type=" in COORDINATOR_SYSTEM
+
+
+def test_subagent_prompt_uses_the_agents_prompt_and_scoped_clauses():
+    clause = Clause(
+        clause_id="12.1", page=9, type="liability",
+        text="Total liability shall not exceed $5,000,000.",
+        amount=Decimal("5000000"), source_name="acme_msa.pdf",
+    )
+    prompt = subagent_prompt(build_extractor_task([clause]))
+    assert AGENTS["extractor"].prompt in prompt  # not the removed task.instruction
+    assert "12.1" in prompt
+
+
+def _state() -> CoordinatorState:
+    return CoordinatorState(
+        contract_id="vendor-acme-msa-2026", source_name="acme_msa.pdf", doc_sha256="sha",
+    )
+
+
+def test_build_agent_options_wires_the_real_sdk_surface():
+    pytest.importorskip("claude_agent_sdk")
+    from contract_review.live import build_agent_options
+
+    options = build_agent_options(
+        _state(), resume="sess-1", fork_session=True, session_id="sess-2"
+    )
+    assert set(options.agents) == {"extractor", "risk_checker"}
+    assert "Task" in options.allowed_tools  # required to spawn subagents
+    assert {m.matcher for m in options.hooks["PreToolUse"]} == {"send_email"}
+    assert {m.matcher for m in options.hooks["PostToolUse"]} == {"pdf_extract"}
+    assert (options.resume, options.fork_session, options.session_id) == (
+        "sess-1", True, "sess-2",
+    )
+
+
+def test_real_sdk_pre_tool_hook_denies_when_review_incomplete():
+    pytest.importorskip("claude_agent_sdk")
+    from contract_review.live import build_agent_options
+
+    options = build_agent_options(_state())  # no review in state
+    gate = options.hooks["PreToolUse"][0].hooks[0]
+    email = EmailRequest(
+        to="legal@acme.com", subject="x", body="y", cited_clause_ids=[],
+    )
+    out = asyncio.run(gate(
+        {"tool_name": "send_email", "tool_input": email.model_dump()}, "t1", None,
+    ))
+    assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+

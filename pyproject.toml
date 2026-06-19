@@ -15,6 +15,7 @@ optional = true
 
 [tool.poetry.group.live.dependencies]
 anthropic = ">=0.42.0"
+claude-agent-sdk = ">=0.2.0"
 python-dotenv = ">=1.0"
 
 [tool.poetry.group.dev.dependencies]

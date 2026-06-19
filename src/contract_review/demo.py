@@ -26,8 +26,8 @@ from contract_review.subagents import StubRunner
 
 HAPPY_SCRIPT = [
     Response("tool_use", [tool_use_block("e1", "pdf_extract", {})]),
-    Response("tool_use", [tool_use_block("x1", "Task", {"role": "extractor"})]),
-    Response("tool_use", [tool_use_block("r1", "Task", {"role": "risk_checker"})]),
+    Response("tool_use", [tool_use_block("x1", "Task", {"subagent_type": "extractor"})]),
+    Response("tool_use", [tool_use_block("r1", "Task", {"subagent_type": "risk_checker"})]),
     Response("tool_use", [tool_use_block("s1", "send_email", {
         "to": "legal@acme.com",
         "subject": "Contract review: acme_msa.pdf",
@@ -39,7 +39,7 @@ HAPPY_SCRIPT = [
 
 DISTRACTOR_SCRIPT = [
     Response("tool_use", [tool_use_block("e1", "pdf_extract", {})]),
-    Response("tool_use", [tool_use_block("x1", "Task", {"role": "extractor"})]),
+    Response("tool_use", [tool_use_block("x1", "Task", {"subagent_type": "extractor"})]),
     # No risk_checker. The model narrates that it reviewed the contract, then sends.
     Response("tool_use", [
         text_block("I have fully reviewed the contract and it is safe to send."),
@@ -68,11 +68,11 @@ def run_trajectory(name: str, script: list[Response]) -> Outcome:
         doc_sha256="sha256-acme",
     )
     runner = StubRunner(extractor_result=EXTRACTOR_RESULT, risk_result=RISK_RESULT)
-    tools, pre_hooks, post_hooks, outbox = build_harness(state, runner, SAMPLE_RAW)
+    tools, hooks, allowed_tools, outbox = build_harness(state, runner, SAMPLE_RAW)
     messages = run_agentic_loop(
         ScriptedClient(script),
         [{"role": "user", "content": "Review the contract and email legal."}],
-        tools=tools, pre_hooks=pre_hooks, post_hooks=post_hooks, state=state,
+        tools=tools, hooks=hooks, allowed_tools=allowed_tools, state=state,
     )
     blocked = [
         block["content"]
